@@ -63,6 +63,30 @@ header.topbar {
   color: var(--muted); font-size: 12px; font-family: var(--mono);
 }
 
+/* live scan indicator */
+.topbar .pill.scan-status { display: inline-flex; align-items: center; gap: 7px; }
+.topbar .pill.scan-status.scanning {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-2));
+  animation: scan-pulse 1.6s ease-in-out infinite;
+}
+.scan-status .spinner {
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  animation: scan-spin 0.7s linear infinite;
+}
+@keyframes scan-spin { to { transform: rotate(360deg); } }
+@keyframes scan-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 32%, transparent); }
+  50%      { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .topbar .pill.scan-status.scanning { animation: none; }
+  .scan-status .spinner { animation-duration: 1.6s; }
+}
+
 /* main */
 main#app { padding: 24px 20px; max-width: 1400px; margin: 0 auto; }
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from .db import (
+    connect,
     overview_totals, expensive_prompts, project_summary,
     tool_token_breakdown, recent_sessions, session_turns,
     daily_token_breakdown, model_breakdown, skill_breakdown,
@@ -32,6 +33,10 @@ EVENTS: "queue.Queue[dict]" = queue.Queue()
 # contention. The background loop waits its turn; the endpoint returns
 # "already running" rather than blocking a request thread for a whole scan.
 _SCAN_LOCK = threading.Lock()
+
+# Live scan status for the UI's "scanning..." indicator. Simple scalar
+# assignments are atomic under the GIL, so no extra lock is needed to read it.
+_SCAN_STATE = {"scanning": False, "last_scan_ts": None}
 
 MAX_POST_BYTES = 1_000_000  # 1 MB — we only accept tiny JSON bodies (plan, tip key)
 MAX_LIMIT = 1000
@@ -146,6 +151,18 @@ def build_handler(db_path: str, projects_dir: str):
                 return _send_json(self, session_turns(db_path, sid))
             if path == "/api/tips":
                 return _send_json(self, all_tips(db_path))
+            if path == "/api/status":
+                with connect(db_path) as c:
+                    files    = c.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+                    sessions = c.execute("SELECT COUNT(DISTINCT session_id) FROM messages").fetchone()[0]
+                    messages = c.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                return _send_json(self, {
+                    "scanning":     _SCAN_STATE["scanning"],
+                    "last_scan_ts": _SCAN_STATE["last_scan_ts"],
+                    "files":        files,
+                    "sessions":     sessions,
+                    "messages":     messages,
+                })
             if path == "/api/plan":
                 return _send_json(self, {"plan": get_plan(db_path), "pricing": pricing})
             if path == "/api/scan":
@@ -205,11 +222,17 @@ def build_handler(db_path: str, projects_dir: str):
 def _scan_loop(db_path: str, projects_dir: str, interval: float = 30.0):
     while True:
         try:
+            _SCAN_STATE["scanning"] = True
+            EVENTS.put({"type": "scan_start", "ts": time.time()})
             with _SCAN_LOCK:
                 n = scan_dir(projects_dir, db_path)
+            _SCAN_STATE["scanning"] = False
+            _SCAN_STATE["last_scan_ts"] = time.time()
+            EVENTS.put({"type": "scan_done", "n": n, "ts": time.time()})
             if n["messages"] > 0:
                 EVENTS.put({"type": "scan", "n": n, "ts": time.time()})
         except Exception as e:
+            _SCAN_STATE["scanning"] = False
             EVENTS.put({"type": "error", "message": str(e)})
         time.sleep(interval)
 

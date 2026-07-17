@@ -50,6 +50,7 @@ function buildTopbar() {
       ${Object.keys(ROUTES).map(p => `<a href="#${p}" data-route="${p}">${p.slice(1)}</a>`).join('')}
     </nav>
     <div class="spacer"></div>
+    <span class="pill scan-status" id="scan-status" hidden></span>
     <span class="pill" id="plan-pill">api</span>
     <span class="pill muted" title="Cmd/Ctrl+B blurs sensitive text">⌘B blur</span>
   `;
@@ -124,15 +125,58 @@ async function boot() {
     }
   });
 
-  // SSE diff stream
+  // SSE diff stream: flip the indicator instantly on scan start/finish,
+  // and re-render the current view when a scan brought in new data.
   try {
     const es = new EventSource('/api/stream');
     es.onmessage = ev => {
       try {
         const evt = JSON.parse(ev.data);
-        if (evt.type === 'scan') render();
+        if (evt.type === 'scan_start') setScanIndicator(true);
+        else if (evt.type === 'scan_done') setScanIndicator(false);
+        else if (evt.type === 'scan') render();
       } catch {}
     };
+  } catch {}
+
+  // Poll status so the indicator shows live progress (session count climbing)
+  // during a long first scan — SSE only fires at start/finish of each pass.
+  pollStatus();
+  setInterval(pollStatus, 2500);
+}
+
+let _lastScanning = false;
+let _hideStatusTimer = null;
+
+function setScanIndicator(scanning, sessions) {
+  const el = $('#scan-status');
+  if (!el) return;
+  if (scanning) {
+    if (_hideStatusTimer) { clearTimeout(_hideStatusTimer); _hideStatusTimer = null; }
+    el.hidden = false;
+    el.classList.add('scanning');
+    const count = sessions != null ? ` · ${fmt.int(sessions)} sessions` : '';
+    el.innerHTML = `<span class="spinner"></span>scanning${count}`;
+  } else {
+    el.classList.remove('scanning');
+    // A scan just finished: flash "updated", then fade the pill out.
+    if (_lastScanning) {
+      el.innerHTML = `updated ✓`;
+      if (_hideStatusTimer) clearTimeout(_hideStatusTimer);
+      _hideStatusTimer = setTimeout(() => { el.hidden = true; }, 4000);
+    } else {
+      el.hidden = true;
+    }
+  }
+}
+
+async function pollStatus() {
+  try {
+    const s = await api('/api/status');
+    setScanIndicator(s.scanning, s.sessions);
+    // When a scan finishes, refresh the current view so numbers settle.
+    if (_lastScanning && !s.scanning) render();
+    _lastScanning = s.scanning;
   } catch {}
 }
 
