@@ -61,19 +61,32 @@ function setActiveTab(routeKey) {
   $$('header.topbar nav a').forEach(a => a.classList.toggle('active', a.dataset.route === routeKey));
 }
 
+let _rendering = false;
+let _renderQueued = false;
+
 async function render() {
-  const hash = location.hash.replace(/^#/, '') || '/overview';
-  const path = hash.split('?')[0];
-  let key = path;
-  if (path.startsWith('/sessions/')) key = '/sessions';
-  setActiveTab(key);
-  const loader = ROUTES[key] || ROUTES['/overview'];
-  const mod = await loader();
-  $('#app').innerHTML = '';
+  // Coalesce overlapping renders: the SSE stream and the status poll can both
+  // ask to re-render around the same moment. Without this guard two async
+  // renders race to blank and repopulate #app, causing flicker.
+  if (_rendering) { _renderQueued = true; return; }
+  _rendering = true;
   try {
-    await mod.default($('#app'));
-  } catch (e) {
-    $('#app').innerHTML = `<div class="card"><h2>Error</h2><pre>${fmt.htmlSafe(String(e.stack || e))}</pre></div>`;
+    const hash = location.hash.replace(/^#/, '') || '/overview';
+    const path = hash.split('?')[0];
+    let key = path;
+    if (path.startsWith('/sessions/')) key = '/sessions';
+    setActiveTab(key);
+    const loader = ROUTES[key] || ROUTES['/overview'];
+    const mod = await loader();
+    $('#app').innerHTML = '';
+    try {
+      await mod.default($('#app'));
+    } catch (e) {
+      $('#app').innerHTML = `<div class="card"><h2>Error</h2><pre>${fmt.htmlSafe(String(e.stack || e))}</pre></div>`;
+    }
+  } finally {
+    _rendering = false;
+    if (_renderQueued) { _renderQueued = false; render(); }
   }
 }
 
@@ -145,12 +158,17 @@ async function boot() {
   setInterval(pollStatus, 2500);
 }
 
-let _lastScanning = false;
+let _scanningNow = false;
 let _hideStatusTimer = null;
 
+// Single source of truth for the indicator. Tracks the previous state itself
+// so the "updated" flash and the refresh-on-finish fire on the true->false
+// transition regardless of which caller (SSE or poll) observes it first.
 function setScanIndicator(scanning, sessions) {
   const el = $('#scan-status');
   if (!el) return;
+  const wasScanning = _scanningNow;
+  _scanningNow = scanning;
   if (scanning) {
     if (_hideStatusTimer) { clearTimeout(_hideStatusTimer); _hideStatusTimer = null; }
     el.hidden = false;
@@ -159,11 +177,12 @@ function setScanIndicator(scanning, sessions) {
     el.innerHTML = `<span class="spinner"></span>scanning${count}`;
   } else {
     el.classList.remove('scanning');
-    // A scan just finished: flash "updated", then fade the pill out.
-    if (_lastScanning) {
+    if (wasScanning) {
+      // A scan just finished: flash "updated", fade out, and refresh numbers.
       el.innerHTML = `updated ✓`;
       if (_hideStatusTimer) clearTimeout(_hideStatusTimer);
       _hideStatusTimer = setTimeout(() => { el.hidden = true; }, 4000);
+      render();
     } else {
       el.hidden = true;
     }
@@ -174,9 +193,6 @@ async function pollStatus() {
   try {
     const s = await api('/api/status');
     setScanIndicator(s.scanning, s.sessions);
-    // When a scan finishes, refresh the current view so numbers settle.
-    if (_lastScanning && !s.scanning) render();
-    _lastScanning = s.scanning;
   } catch {}
 }
 
