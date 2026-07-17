@@ -247,6 +247,12 @@ def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict
     totals = {"messages": 0, "tools": 0, "files": 0}
     if not root.is_dir():
         return totals
+    # Commit after every file so a long first scan publishes its progress
+    # continuously (readers see each committed file under WAL) instead of
+    # nothing until the whole ~1000-file walk finishes. Per-file commits are
+    # cheap under WAL + synchronous=NORMAL (no fsync until checkpoint).
+    COMMIT_EVERY = 1
+    files_since_commit = 0
     with connect(db_path) as conn:
         for p in root.rglob("*.jsonl"):
             try:
@@ -273,5 +279,9 @@ def scan_dir(projects_root: Union[str, Path], db_path: Union[str, Path]) -> dict
             totals["messages"] += sub["messages"]
             totals["tools"]    += sub["tools"]
             totals["files"]    += 1
+            files_since_commit += 1
+            if files_since_commit >= COMMIT_EVERY:
+                conn.commit()
+                files_since_commit = 0
         conn.commit()
     return totals

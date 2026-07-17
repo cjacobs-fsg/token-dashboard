@@ -79,10 +79,27 @@ def default_db_path() -> Path:
     return Path.home() / ".claude" / "token-dashboard.db"
 
 
+def _apply_pragmas(conn) -> None:
+    """Concurrency hygiene shared by every connection.
+
+    WAL lets readers and the single writer proceed without blocking each
+    other, so the HTTP API can serve queries while a scan is writing (the
+    default rollback-journal mode holds an exclusive lock for the whole scan,
+    which starved every read and made the dashboard hang with no data).
+    busy_timeout turns any residual contention into a short wait instead of
+    an immediate "database is locked". synchronous=NORMAL is safe under WAL
+    and markedly faster for the bulk-insert scan.
+    """
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA synchronous = NORMAL")
+
+
 def init_db(path: Union[str, Path]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as c:
+    with sqlite3.connect(path, timeout=30.0) as c:
+        _apply_pragmas(c)
         _migrate_add_message_id(c)
         c.executescript(SCHEMA)
 
@@ -112,9 +129,10 @@ def _migrate_add_message_id(conn) -> None:
 
 @contextmanager
 def connect(path: Union[str, Path]):
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    _apply_pragmas(conn)
     try:
         yield conn
     finally:

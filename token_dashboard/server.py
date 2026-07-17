@@ -26,6 +26,13 @@ PRICING_JSON = Path(__file__).resolve().parent.parent / "pricing.json"
 
 EVENTS: "queue.Queue[dict]" = queue.Queue()
 
+# Serialize scans: the background loop and the interactive /api/scan endpoint
+# both call scan_dir, but WAL permits only one writer at a time. Without this
+# an interactive rescan racing the background loop could error under lock
+# contention. The background loop waits its turn; the endpoint returns
+# "already running" rather than blocking a request thread for a whole scan.
+_SCAN_LOCK = threading.Lock()
+
 MAX_POST_BYTES = 1_000_000  # 1 MB — we only accept tiny JSON bodies (plan, tip key)
 MAX_LIMIT = 1000
 
@@ -142,7 +149,12 @@ def build_handler(db_path: str, projects_dir: str):
             if path == "/api/plan":
                 return _send_json(self, {"plan": get_plan(db_path), "pricing": pricing})
             if path == "/api/scan":
-                n = scan_dir(projects_dir, db_path)
+                if not _SCAN_LOCK.acquire(blocking=False):
+                    return _send_json(self, {"status": "scan already running"})
+                try:
+                    n = scan_dir(projects_dir, db_path)
+                finally:
+                    _SCAN_LOCK.release()
                 return _send_json(self, n)
             if path == "/api/stream":
                 self.send_response(200)
@@ -193,7 +205,8 @@ def build_handler(db_path: str, projects_dir: str):
 def _scan_loop(db_path: str, projects_dir: str, interval: float = 30.0):
     while True:
         try:
-            n = scan_dir(projects_dir, db_path)
+            with _SCAN_LOCK:
+                n = scan_dir(projects_dir, db_path)
             if n["messages"] > 0:
                 EVENTS.put({"type": "scan", "n": n, "ts": time.time()})
         except Exception as e:
